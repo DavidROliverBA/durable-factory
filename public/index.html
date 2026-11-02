@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Durable Pi · Crash Lab</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #12151d; --panel2: #171b25; --line: #252a37; --text: #e6e8ee; --dim: #8a90a2;
+    --green: #3ddc97; --red: #ff5d6c; --amber: #ffb547; --blue: #6aa8ff; --violet: #b18cff;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Inter", sans-serif; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); padding: 7px 12px; }
+  button:hover:not(:disabled) { border-color: #3a4152; background: #1d2230; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.danger { background: #3a1219; border-color: #6b1f2b; color: #ffd5da; }
+  button.danger:hover:not(:disabled) { background: #521722; }
+  button.go { background: #10301f; border-color: #1f5c3b; color: #c9f7df; }
+  button.primary { background: #16264a; border-color: #2a447d; color: #d6e4ff; }
+  .mono { font-family: var(--mono); }
+  .dim { color: var(--dim); }
+
+  header { display: flex; align-items: center; gap: 18px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: linear-gradient(#11141c, #0d1016); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
+  header h1 small { color: var(--dim); font-weight: 400; margin-left: 6px; }
+  .proc { display: flex; align-items: center; gap: 12px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); min-width: 330px; }
+  .heart { width: 12px; height: 12px; border-radius: 50%; background: var(--dim); flex: none; }
+  .proc.running .heart { background: var(--green); box-shadow: 0 0 0 0 rgba(61,220,151,.6); animation: beat 1.4s infinite; }
+  .proc.starting .heart { background: var(--amber); animation: blink .5s infinite alternate; }
+  .proc.dead { border-color: #6b1f2b; background: #1e0d11; }
+  .proc.dead .heart { background: var(--red); }
+  @keyframes beat { 0% { box-shadow: 0 0 0 0 rgba(61,220,151,.6);} 70% { box-shadow: 0 0 0 10px rgba(61,220,151,0);} 100% { box-shadow: 0 0 0 0 rgba(61,220,151,0);} }
+  @keyframes blink { to { opacity: .3; } }
+  .proc b { font-size: 13px; letter-spacing: .6px; }
+  .controls { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+  .toggle { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 13px; cursor: pointer; user-select: none; }
+  .toggle input { accent-color: var(--green); }
+  .scars { font-size: 13px; color: var(--dim); }
+  .scars b { color: var(--red); }
+
+  main { display: grid; grid-template-columns: 300px minmax(380px, 1fr) minmax(360px, 1fr); gap: 14px; padding: 14px 20px; height: calc(100vh - 62px - 150px); min-height: 520px; }
+  .col { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .panel > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin: 0; padding: 11px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  .panel > h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .scroll { overflow: auto; padding: 12px 14px; flex: 1; min-height: 0; }
+  .conn { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  .conn.live { color: var(--green); border-color: #1f5c3b; }
+  .conn.down { color: var(--red); border-color: #6b1f2b; }
+
+  /* scenarios */
+  .scn { border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; margin-bottom: 10px; background: var(--panel2); }
+  .scn h3 { margin: 0 0 4px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+  .scn h3 .n { width: 20px; height: 20px; border-radius: 6px; background: #222838; color: var(--dim); font-size: 11px; display: grid; place-items: center; }
+  .scn p { margin: 0 0 9px; color: var(--dim); font-size: 12.5px; }
+  .scn .tip { color: var(--amber); font-size: 12px; margin: 8px 0 0; }
+  .composer { display: flex; gap: 6px; }
+  .composer input { flex: 1; background: #0e1118; border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 7px 9px; font: 13px var(--mono); }
+
+  /* job runs */
+  .run { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; background: var(--panel2); }
+  .run-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .run-head .title { font-weight: 600; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); text-transform: uppercase; letter-spacing: .5px; }
+  .badge.running { color: var(--blue); border-color: #2a447d; }
+  .badge.waiting { color: var(--amber); border-color: #6b4e1f; animation: blink .8s infinite alternate; }
+  .badge.completed { color: var(--green); border-color: #1f5c3b; }
+  .badge.failed, .badge.aborted, .badge.declined { color: var(--red); border-color: #6b1f2b; }
+  .badge.resumed { color: var(--violet); border-color: #4b3780; }
+  .phases { display: flex; gap: 6px; margin-bottom: 10px; }
+  .phase { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; background: #10131a; position: relative; overflow: hidden; }
+  .phase .lbl { font-weight: 600; }
+  .phase .sub { color: var(--dim); font-size: 11px; }
+  .phase.done { border-color: #1f5c3b; } .phase.done .lbl { color: var(--green); }
+  .phase.running { border-color: #2a447d; box-shadow: inset 0 0 0 1px #2a447d; } .phase.running .lbl { color: var(--blue); }
+  .phase.waiting { border-color: #6b4e1f; } .phase.waiting .lbl { color: var(--amber); }
+  .phase.failed, .phase.aborted { border-color: #6b1f2b; } .phase.failed .lbl, .phase.aborted .lbl { color: var(--red); }
+  .phase .bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--blue); transition: width .4s; }
+  .phase.done .bar { background: var(--green); }
+  .dots { display: flex; gap: 3px; margin-top: 5px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 3px; background: #252a37; }
+  .dot.on { background: var(--green); }
+  .dot.cur { background: var(--blue); animation: blink .5s infinite alternate; }
+
+  .timeline { position: relative; height: 34px; background: #0e1118; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+  .timeline .tick { position: absolute; top: 9px; width: 3px; height: 16px; border-radius: 2px; background: var(--green); opacity: .85; }
+  .timeline .tick.checkpoint { background: var(--violet); }
+  .timeline .tick.approval { background: var(--amber); }
+  .timeline .tick.note { background: var(--blue); }
+  .timeline .down { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(45deg, rgba(255,93,108,.18) 0 6px, rgba(255,93,108,.06) 6px 12px); border-left: 2px solid var(--red); }
+  .timeline .down span { position: absolute; top: -1px; left: 3px; font-size: 10px; color: var(--red); font-weight: 700; }
+  .timeline .now { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dim); }
+  .tl-legend { display: flex; gap: 12px; font-size: 11px; color: var(--dim); margin-bottom: 8px; }
+  .tl-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+  .steps { font: 12px var(--mono); max-height: 150px; overflow: auto; border-top: 1px dashed var(--line); padding-top: 6px; }
+  .step { display: flex; gap: 8px; padding: 1px 0; }
+  .step .k { color: var(--dim); width: 74px; flex: none; }
+  .step.note { color: var(--violet); }
+  .step.error { color: var(--red); }
+  .approve { display: flex; gap: 8px; align-items: center; margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: #241b0c; border: 1px solid #6b4e1f; color: #ffe2b0; font-size: 13px; }
+  .approve span { flex: 1; }
+  .empty { color: var(--dim); text-align: center; padding: 30px 10px; font-size: 13px; }
+
+  /* transcript */
+  .msg { margin-bottom: 10px; }
+  .msg .who { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 3px; }
+  .msg.user .bubble { background: #16264a; border: 1px solid #2a447d; border-radius: 10px; padding: 7px 10px; display: inline-block; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .msg.assistant .txt { white-space: pre-wrap; word-break: break-word; }
+  .msg.event .txt { color: var(--violet); font-size: 12.5px; }
+  .tool { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; overflow: hidden; }
+  .tool .th { display: flex; gap: 8px; align-items: center; padding: 5px 9px; background: #10131a; font: 12px var(--mono); }
+  .tool .th .st { margin-left: auto; font-size: 11px; }
+  .tool pre { margin: 0; padding: 7px 9px; font: 12px var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; color: #c4c9d6; }
+  .tool.running { border-color: #2a447d; } .tool.running .st { color: var(--blue); }
+  .tool.done .st { color: var(--green); }
+  .tool.interrupted { border-color: #6b4e1f; background: #1c160b; } .tool.interrupted .st { color: var(--amber); font-weight: 700; }
+  .tool.error .st { color: var(--red); }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--blue); border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* tasks */
+  .tasks { font: 12px var(--mono); }
+  .task { display: grid; grid-template-columns: 38px 1fr auto; gap: 8px; padding: 3px 0; border-bottom: 1px dashed #1d2130; }
+  .task .s { color: var(--blue); }
+  .task .s.waiting { color: var(--amber); }
+
+  footer { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 20px 14px; height: 150px; }
+  footer .panel { height: 136px; }
+  .log { font: 11.5px var(--mono); color: #b4bacb; }
+  .log div { white-space: pre-wrap; word-break: break-all; }
+  .log .t { color: #5b6275; margin-right: 6px; }
+  .log .crash { color: var(--red); } .log .ok { color: var(--green); } .log .snap { color: var(--violet); }
+  .ev { display: inline-block; font: 11px var(--mono); padding: 1px 6px; margin: 2px; border-radius: 5px; background: #1a1f2b; color: #9aa2b6; }
+  .ev.tool_execution_start, .ev.tool_execution_end { color: var(--blue); }
+  .ev.submission { color: var(--amber); }
+  .ev.snapshot, .ev.hello { color: var(--violet); }
+  .ev.run_start, .ev.run_end { color: var(--green); }
+
+  header button, .toggle, .scars { white-space: nowrap; }
+  .proc { min-width: 0; flex: none; }
+  @media (max-width: 1640px) { header h1 small { display: none; } }
+
+  /* help */
+  .help-btn { width: 34px; height: 34px; padding: 0; border-radius: 50%; font-weight: 700; font-size: 15px; color: var(--blue); border-color: #2a447d; }
+  dialog#help { width: min(760px, 92vw); max-height: 86vh; padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); box-shadow: 0 30px 80px rgba(0,0,0,.6); }
+  dialog#help::backdrop { background: rgba(5,7,10,.7); backdrop-filter: blur(3px); }
+  dialog#help[open] { display: flex; flex-direction: column; animation: pop .18s ease-out; }
+  @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+  .help-head { display: flex; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  .help-head h2 { margin: 0; font-size: 17px; }
+  .help-close { margin-left: auto; border: none; background: none; color: var(--dim); font-size: 16px; }
+  .help-body { overflow: auto; padding: 6px 22px 18px; font-size: 13.5px; line-height: 1.6; }
+  .help-body h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--blue); margin: 20px 0 6px; }
+  .help-body p, .help-body li, .help-body dd { color: #c9cedb; }
+  .help-body .lead { font-size: 15px; color: var(--text); margin-top: 14px; }
+  .help-body a { color: var(--blue); }
+  .help-body ul, .help-body ol { padding-left: 20px; margin: 6px 0; }
+  .help-body li { margin-bottom: 6px; }
+  .help-body dl { display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; margin: 6px 0; }
+  .help-body dt { font-weight: 600; }
+  .help-body dd { margin: 0; }
+  .arch { background: #0e1118; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 11.5px; white-space: pre; overflow-x: auto; color: #b4bacb; margin: 8px 0 10px; }
+  .pill { font: 11px var(--mono); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
+  .pill.amber { color: var(--amber); border-color: #6b4e1f; }
+  .pill.violet { color: var(--violet); border-color: #4b3780; }
+  .kbd { font: 11px var(--mono); padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; }
+  .small { font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Durable Pi · Crash Lab <small>kill the agent server. watch nothing get lost.</small></h1>
+  <a href="/factory" style="color:var(--blue);font-size:13px;white-space:nowrap">Factory floor →</a>
+  <div id="proc" class="proc dead">
+    <div class="heart"></div>
+    <div><b id="procState">DEAD</b> <span id="procMeta" class="dim mono" style="font-size:12px"></span></div>
+  </div>
+  <div class="controls">
+    <span class="scars">crashes survived: <b id="crashCount">0</b></span>
+    <label class="toggle" title="Like launchd/systemd: bring the backend back automatically after it dies"><input type="checkbox" id="autoRestart" /> auto-restart</label>
+    <button class="danger" id="btnKill" title="SIGKILL the dpi-backend process">💥 kill -9</button>
+    <button class="go" id="btnStart">▶ start</button>
+    <button class="primary" id="btnCrashRestart" title="SIGKILL, wait 1.2s, start again">⚡ crash &amp; restart</button>
+    <button id="btnReset" title="Stop the backend and wipe its SQLite data">⟲ reset</button>
+    <button id="btnHelp" class="help-btn" title="What is this? (press ?)" aria-label="Help">?</button>
+  </div>
+</header>
+
+<dialog id="help">
+  <div class="help-head">
+    <h2>What is this?</h2>
+    <button class="help-close" onclick="$('help').close()" aria-label="Close">✕</button>
+  </div>
+  <div class="help-body">
+    <p class="lead">A hands-on demo of <a href="https://github.com/disler/durable-pi" target="_blank" rel="noopener">Durable Pi</a>: AI agents whose work <b>survives the process dying</b>. This page runs a real agent server on your Mac. You crash it on purpose and watch what comes back.</p>
+
+    <h3>The problem it solves</h3>
+    <p>A normal agent keeps its in-flight work in memory: the tool call it's running, the job step it's on, what it's waiting for. Kill the process and that's gone. "Resume" just reloads the chat log, and nobody knows whether the half-finished command ran or not.</p>
+    <p>A <b>durable</b> agent writes every step to a SQLite database <i>before</i> acting on it: messages, queued input, task checkpoints, waits. When the process restarts, it reads the database and knows exactly where each piece of work stopped.</p>
+
+    <h3>How this page works</h3>
+    <div class="arch mono">your browser  ──►  lab server (Bun, :4791)  ──►  dpi-backend (Node, :4790)  ──►  agent.sqlite
+                       │  supervises the backend process
+                       └  💥 kill -9 · ▶ start · ⚡ crash &amp; restart</div>
+    <ul>
+      <li><b>dpi-backend</b> is the real, unmodified server from the durable-pi repo. It owns the agent, its tools and its database.</li>
+      <li><b>kill -9</b> sends SIGKILL: the process dies instantly, with no chance to save or clean up. That's the worst case, like a power cut.</li>
+      <li>The model is a <b>faux</b> (scripted, free, offline) model, so the demo costs nothing and behaves the same every time. The durability machinery is identical with a real model.</li>
+      <li>The browser never talks to the backend directly. When the backend dies, the page shows it reconnecting, then loads a fresh snapshot from SQLite.</li>
+    </ul>
+
+    <h3>Try it</h3>
+    <ol>
+      <li><b>Scenario 1:</b> start the long job, click <b>kill -9</b> around check 5, then <b>start</b>. The checks carry on from 5, not 1. The red striped band on the timeline is the time the server was dead.</li>
+      <li><b>Scenario 2:</b> start the release check and wait for the <b>Approve</b> prompt. Kill the server and leave it dead for a while, then start it. It's still waiting for you. Approve, and it publishes exactly once.</li>
+      <li><b>Scenario 3:</b> start the bash loop and kill it mid-way. After restart, the tool is marked <span class="pill amber">INTERRUPTED</span>. The agent is told the command <i>may have partially run</i>, rather than having it silently re-run (imagine that command was "charge the card").</li>
+    </ol>
+
+    <h3>Reading the screen</h3>
+    <dl>
+      <dt>Header pill</dt><dd>Is the backend process alive? Shows its PID, which changes after every restart, proving it really is a new process.</dd>
+      <dt>Durable jobs</dt><dd>Multi-step workflows. Each box is a phase, each dot a checkpoint. <span class="pill violet">resumed ×N</span> means a step was cut off mid-way and re-entered from its checkpoint.</dd>
+      <dt>Agent transcript</dt><dd>The conversation, including live tool output.</dd>
+      <dt>Live durable tasks</dt><dd>pi-durable's task graph: every model call, tool call and job is a task row in SQLite. These are the rows that get picked up after a crash.</dd>
+      <dt>Wire events</dt><dd>The raw event stream. After each reconnect you'll see <span class="pill violet">hello</span> <span class="pill violet">snapshot</span>: nothing is replayed, and the client just reloads the current state from the database.</dd>
+      <dt>auto-restart</dt><dd>Simulates a service manager (launchd/systemd) bringing the server straight back.</dd>
+      <dt>reset</dt><dd>Wipes all lab data in <span class="mono">~/.dpi-lab</span> and starts fresh.</dd>
+    </dl>
+
+    <p class="dim small">Press <span class="kbd">?</span> to open this, <span class="kbd">Esc</span> to close.</p>
+  </div>
+</dialog>
+
+<main>
+  <div class="col">
+    <div class="panel" style="flex:1">
+      <h2>Scenarios <span class="right dim" id="provider"></span></h2>
+      <div class="scroll">
+        <div class="scn">
+          <h3><span class="n">1</span>Long job, checkpoint by checkpoint</h3>
+          <p><span class="mono">change-watch</span>: baseline the workspace, then 12 checks two seconds apart, one durable checkpoint per check.</p>
+          <button class="primary" onclick="runJob('change-watch', {checks: 12, interval_seconds: 2})">Run job</button>
+          <div class="tip">→ Crash it at check 5. It resumes at check 5, not 1.</div>
+        </div>
+        <div class="scn">
+          <h3><span class="n">2</span>A human approval that outlives the process</h3>
+          <p><span class="mono">release-check</span>: plan, then a subagent gathers evidence, then the job <b>waits for you</b> before it publishes.</p>
+          <button class="primary" onclick="runJob('release-check', {})">Run job</button>
+          <div class="tip">→ While it waits, kill the server and leave it dead. Start it again, then approve. It publishes once.</div>
+        </div>
+        <div class="scn">
+          <h3><span class="n">3</span>A tool call cut off mid-flight</h3>
+          <p>The agent runs a 15-second <span class="mono">bash</span> loop. A command that may have partly run is <b>not</b> silently re-run.</p>
+          <button class="primary" onclick="runBash()">Run bash loop</button>
+          <div class="tip">→ Kill it around step 6. After restart the result is marked <i>interrupted</i>, and the agent decides what to do next.</div>
+        </div>
+        <div class="scn">
+          <h3><span class="n">4</span>Talk to the agent</h3>
+          <p id="composerHint">Faux model: <span class="mono">!cmd</span> runs bash, <span class="mono">slow: text</span> streams, <span class="mono">jobs?</span> lists jobs. Anything else echoes.</p>
+          <div class="composer">
+            <input id="prompt" placeholder="!ls -la" />
+            <button onclick="sendPrompt()">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel" style="flex:1">
+      <h2>Durable jobs <span class="right"><span id="connAgent" class="conn down">stream offline</span></span></h2>
+      <div class="tl-legend" style="padding:8px 14px 0">
+        <span><i style="background:var(--green)"></i>step</span>
+        <span><i style="background:var(--violet)"></i>checkpoint</span>
+        <span><i style="background:var(--amber)"></i>approval</span>
+        <span><i style="background:repeating-linear-gradient(45deg,var(--red) 0 2px,transparent 2px 4px)"></i>process dead</span>
+      </div>
+      <div class="scroll" id="runs"><div class="empty">No job runs yet. Start scenario 1 or 2.</div></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel" style="flex:3">
+      <h2>Agent transcript · <span class="mono" style="text-transform:none">crash-lab › Main</span>
+        <span class="right"><span id="busy" class="dim"></span></span></h2>
+      <div class="scroll" id="transcript"><div class="empty">Waiting for the backend…</div></div>
+    </div>
+    <div class="panel" style="flex:1.2">
+      <h2>Live durable tasks <span class="right dim" style="font-size:11px">from pi-durable's task graph in SQLite</span></h2>
+      <div class="scroll tasks" id="tasks"><div class="empty" style="padding:10px">idle</div></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="panel">
+    <h2>Supervisor &amp; backend log</h2>
+    <div class="scroll log" id="log"></div>
+  </div>
+  <div class="panel">
+    <h2>Wire events <span class="right dim" style="font-size:11px">agent SSE stream: hello → snapshot → deltas. Reconnects get a fresh snapshot.</span></h2>
+    <div class="scroll" id="wire"></div>
+  </div>
+</footer>
+
+<script>
+const SESSION = "crash-lab";
+const A = `/api/sessions/${SESSION}/agents/main`;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const hhmmss = (t) => new Date(t).toLocaleTimeString([], { hour12: false });
+
+let lab = { state: "dead", crashes: [] };
+let downs = []; // [{from, to?}] process-dead intervals, for the job timelines
+let jobRuns = {};
+let transcript = [];
+let liveTools = {}; // toolCallId → output while running
+let busy = false;
+
+// ------------------------------------------------------------------ supervisor stream
+function connectLab() {
+  const es = new EventSource("/lab/events");
+  es.onmessage = (m) => {
+    const e = JSON.parse(m.data);
+    if (e.type === "status") setLab(e.status);
+    if (e.type === "logs") { $("log").innerHTML = ""; e.items.forEach(addLog); }
+    if (e.type === "log") addLog(e);
+    if (e.type === "reset") { jobRuns = {}; transcript = []; downs = []; renderRuns(); renderTranscript(); }
+  };
+}
+function setLab(s) {
+  const prev = lab.state;
+  lab = s;
+  const el = $("proc");
+  el.className = "proc " + s.state;
+  $("procState").textContent = s.state.toUpperCase();
+  $("procMeta").textContent = s.state === "running" ? `pid ${s.pid} · up ${Math.round((Date.now() - s.startedAt) / 1000)}s`
+    : s.state === "dead" && s.diedAt ? `down ${Math.round((Date.now() - s.diedAt) / 1000)}s` : s.pid ? `pid ${s.pid}` : "";
+  $("crashCount").textContent = s.crashes.length;
+  $("autoRestart").checked = s.autoRestart;
+  $("btnKill").disabled = s.state !== "running";
+  $("btnStart").disabled = s.state !== "dead";
+  $("btnCrashRestart").disabled = s.state !== "running";
+  $("provider").textContent = `model: ${s.provider === "faux" ? "faux (free, offline)" : "OpenRouter"}`;
+  if (s.provider !== "faux") $("composerHint").textContent = "Real model via OpenRouter. Ask it anything; it has bash, read, write and edit in the lab workspace.";
+  // dead intervals
+  if (s.state === "dead" && s.diedAt && (!downs.length || downs.at(-1).to)) downs.push({ from: s.diedAt });
+  if (s.state !== "dead" && downs.length && !downs.at(-1).to) downs.at(-1).to = Date.now();
+  if (prev !== "running" && s.state === "running") onBackendUp();
+}
+setInterval(() => lab && setLab(lab), 1000);
+
+function addLog(e) {
+  const d = document.createElement("div");
+  const cls = /💥|✕|stderr/.test(e.line) ? "crash" : /●|▶/.test(e.line) ? "ok" : /snapshot/.test(e.line) ? "snap" : "";
+  d.className = cls;
+  d.innerHTML = `<span class="t">${hhmmss(e.at)}</span>${esc(e.line)}`;
+  const box = $("log");
+  box.appendChild(d);
+  while (box.children.length > 150) box.firstChild.remove();
+  box.scrollTop = box.scrollHeight;
+}
+const uiLog = (line) => addLog({ line, at: Date.now() });
+
+// ------------------------------------------------------------------ backend api
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "content-type": "application/json", ...(opts.headers || {}) } });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(body?.error?.message || r.statusText), { code: body?.error?.code, status: r.status });
+  return body;
+}
+async function ensureSession() {
+  const sessions = await api("/api/sessions");
+  if (sessions.some((s) => s.name === SESSION)) return;
+  const dev = await api("/api/device");
+  const model = dev.models.find((m) => m.id === dev.defaultModel) || dev.models[0];
+  await api("/api/sessions", { method: "POST", body: JSON.stringify({ name: SESSION, cwd: ".", model: { provider: model.provider, modelId: model.id } }) });
+  uiLog(`created session "${SESSION}" (${model.provider}/${model.id})`);
+}
+async function onBackendUp() {
+  try { await ensureSession(); } catch (e) { uiLog("session: " + e.message); return; }
+  connectAgent(); connectSession(); refreshTranscript();
+}
+
+// ------------------------------------------------------------------ agent + session streams
+let agentES, sessionES, retryT;
+function wire(type, extra = "") {
+  const box = $("wire");
+  const s = document.createElement("span");
+  s.className = "ev " + type;
+  s.textContent = type + extra;
+  box.appendChild(s);
+  while (box.children.length > 220) box.firstChild.remove();
+  box.scrollTop = box.scrollHeight;
+}
+function connectAgent() {
+  agentES?.close();
+  const es = (agentES = new EventSource(`${A}/events?docs=demo.job-runs`));
+  es.addEventListener("hello", () => { wire("hello"); setConn(true); });
+  es.addEventListener("snapshot", (m) => {
+    wire("snapshot", " (fresh state from SQLite)");
+    const d = JSON.parse(m.data);
+    liveTools = {};
+    busy = !!d.snapshot?.busy || !!d.snapshot?.running;
+    refreshTranscript();
+  });
+  es.addEventListener("batch", (m) => {
+    const { events } = JSON.parse(m.data);
+    let refresh = false;
+    for (const e of events) {
+      if (!["message_update", "usage_changed"].includes(e.type)) wire(e.type);
+      if (e.type === "tool_execution_start") liveTools[e.toolCallId] = "";
+      if (e.type === "tool_execution_update") liveTools[e.toolCallId] = e.output?.set ?? (liveTools[e.toolCallId] || "") + (e.output?.append ?? "");
+      if (e.type === "run_start") busy = true;
+      if (e.type === "run_end") busy = false;
+      if (["message_end", "tool_execution_end", "run_end", "reset"].includes(e.type)) refresh = true;
+    }
+    renderBusy();
+    if (refresh) refreshTranscript(); else renderTranscript();
+  });
+  es.addEventListener("doc", (m) => {
+    const d = JSON.parse(m.data);
+    if (d.kind === "demo.job-runs") { jobRuns = d.value?.items || {}; renderRuns(); }
+  });
+  es.onerror = () => {
+    es.close(); setConn(false);
+    clearTimeout(retryT);
+    retryT = setTimeout(() => lab.state === "running" && onBackendUp(), 1000);
+  };
+}
+function connectSession() {
+  sessionES?.close();
+  const es = (sessionES = new EventSource(`/api/sessions/${SESSION}/events`));
+  const onTasks = (tasks) => renderTasks(tasks);
+  es.addEventListener("session", (m) => { const d = JSON.parse(m.data); onTasks(d.tasks); busy = d.agents?.some((a) => a.busy) || false; renderBusy(); });
+  es.addEventListener("tasks", (m) => onTasks(JSON.parse(m.data).tasks));
+  es.addEventListener("agents", (m) => { busy = JSON.parse(m.data).agents?.some((a) => a.busy) || false; renderBusy(); });
+  es.onerror = () => es.close();
+}
+function setConn(live) {
+  const c = $("connAgent");
+  c.className = "conn " + (live ? "live" : "down");
+  c.textContent = live ? "● stream live" : "stream offline, reconnecting";
+  if (!live) renderBusy();
+}
+function renderBusy() { $("busy").innerHTML = busy && lab.state === "running" ? '<span class="spinner"></span> working' : ""; }
+
+let tT;
+function refreshTranscript() {
+  clearTimeout(tT);
+  tT = setTimeout(async () => {
+    try { transcript = (await api(`${A}/transcript?format=json`)).items; renderTranscript(); } catch {}
+  }, 120);
+}
+
+// ------------------------------------------------------------------ actions
+async function runJob(job, input) {
+  try {
+    const r = await api(`${A}/demo/jobs`, { method: "POST", body: JSON.stringify({ job, input }) });
+    uiLog(`started durable job ${job} → task ${r.taskId}`);
+  } catch (e) { uiLog(`✕ ${job}: ${e.message}`); }
+}
+async function approve(taskId, approved) {
+  try { await api(`${A}/demo/jobs/${taskId}/approval`, { method: "POST", body: JSON.stringify({ approved }) }); uiLog(`${approved ? "approved" : "declined"} task ${taskId}`); }
+  catch (e) { uiLog(`✕ approval: ${e.message}`); }
+}
+async function send(content) {
+  try {
+    const r = await api(`${A}/messages`, { method: "POST", body: JSON.stringify({ content, requestId: crypto.randomUUID(), whenBusy: "followUp" }) });
+    uiLog(`message admitted: submission ${r.submissionId} (${r.status})`);
+  } catch (e) { uiLog(`✕ send: ${e.message}`); }
+}
+function runBash() {
+  const cmd = 'for i in $(seq 1 15); do echo "step $i of 15  $(date +%T)"; sleep 1; done; echo all done';
+  send(lab.provider === "faux" ? "!" + cmd : `Run exactly this with bash and report what it printed: ${cmd}`);
+}
+function sendPrompt() { const v = $("prompt").value.trim(); if (!v) return; $("prompt").value = ""; send(v); }
+$("prompt").addEventListener("keydown", (e) => e.key === "Enter" && sendPrompt());
+
+const post = (p) => fetch(p, { method: "POST" });
+$("btnKill").onclick = () => post("/lab/kill");
+$("btnStart").onclick = () => post("/lab/start");
+$("btnCrashRestart").onclick = () => post("/lab/crash-restart");
+$("autoRestart").onchange = () => post("/lab/auto-restart");
+$("btnReset").onclick = () => confirm("Stop the backend and wipe all lab data?") && post("/lab/reset");
+$("btnHelp").onclick = () => $("help").showModal();
+$("help").addEventListener("click", (e) => e.target === $("help") && $("help").close()); // click backdrop to close
+document.addEventListener("keydown", (e) => {
+  if (e.key === "?" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName)) { e.preventDefault(); $("help").open ? $("help").close() : $("help").showModal(); }
+});
+if (!localStorage.getItem("dpiLabHelpSeen")) { localStorage.setItem("dpiLabHelpSeen", "1"); $("help").showModal(); }
+
+// ------------------------------------------------------------------ rendering
+function renderRuns() {
+  const runs = Object.values(jobRuns).sort((a, b) => b.startedAt - a.startedAt);
+  const box = $("runs");
+  if (!runs.length) { box.innerHTML = '<div class="empty">No job runs yet. Start scenario 1 or 2.</div>'; return; }
+  box.innerHTML = runs.map(renderRun).join("");
+}
+function renderRun(r) {
+  const now = Date.now();
+  const end = r.endedAt || now;
+  const t0 = r.startedAt, span = Math.max(end - t0, 4000);
+  const pct = (t) => Math.min(100, Math.max(0, ((t - t0) / span) * 100));
+  const steps = r.phases.flatMap((p) => p.steps.map((s) => ({ ...s, phase: p.label })));
+  const ticks = steps.map((s) => `<div class="tick ${s.kind === "checkpoint" ? "checkpoint" : s.kind === "approval" ? "approval" : s.kind === "note" ? "note" : ""}" style="left:${pct(s.at)}%" title="${esc(s.phase + ": " + s.label)}"></div>`).join("");
+  const dz = downs.filter((d) => (d.to || now) > t0 && d.from < end).map((d) =>
+    `<div class="down" style="left:${pct(d.from)}%;width:${Math.max(0.6, pct(d.to || now) - pct(d.from))}%" title="dpi-backend dead"><span>✕</span></div>`).join("");
+  const phases = r.phases.map((p) => {
+    const prog = p.progress;
+    const w = p.status === "done" ? 100 : prog ? (prog.done / prog.total) * 100 : p.status === "running" ? 30 : 0;
+    const dots = prog ? `<div class="dots">${Array.from({ length: prog.total }, (_, i) =>
+      `<div class="dot ${i < prog.done ? "on" : i === prog.done && p.status === "running" ? "cur" : ""}"></div>`).join("")}</div>` : "";
+    return `<div class="phase ${p.status}"><div class="lbl">${esc(p.label)}</div><div class="sub">${p.status}${prog ? ` · ${prog.done}/${prog.total}` : ""}</div>${dots}<div class="bar" style="width:${w}%"></div></div>`;
+  }).join("");
+  const waiting = r.status === "waiting" && r.approval === "pending";
+  const approveBox = waiting ? `<div class="approve"><span>⏸ Waiting for you. This wait is a durable task. Kill the server and it is still waiting after restart.</span>
+      <button class="go" onclick="approve(${r.id}, true)" ${lab.state !== "running" ? "disabled" : ""}>Approve</button>
+      <button class="danger" onclick="approve(${r.id}, false)" ${lab.state !== "running" ? "disabled" : ""}>Decline</button></div>` : "";
+  const crashesDuring = downs.filter((d) => d.from > t0 && d.from < end).length;
+  const stepRows = steps.slice(-30).reverse().map((s) =>
+    `<div class="step ${s.kind === "note" ? "note" : s.status === "error" ? "error" : ""}"><span class="k">${hhmmss(s.at)}</span><span class="k">${esc(s.kind)}</span><span>${esc(s.label)}${s.detail ? ` <span class="dim">${esc(String(s.detail).slice(0, 90))}</span>` : ""}</span></div>`).join("");
+  return `<div class="run">
+    <div class="run-head"><span class="title">${esc(r.title)}</span><span class="dim mono">task ${r.id}</span>
+      <span class="badge ${r.status}">${r.status}</span>
+      ${r.resumed ? `<span class="badge resumed">resumed ×${r.resumed}</span>` : ""}
+      ${crashesDuring ? `<span class="badge failed" title="process deaths during this run">survived ${crashesDuring} crash${crashesDuring > 1 ? "es" : ""}</span>` : ""}
+      <span class="dim" style="margin-left:auto;font-size:12px">${Math.round((end - t0) / 1000)}s</span></div>
+    <div class="phases">${phases}</div>
+    ${approveBox}
+    <div class="timeline">${dz}${ticks}${r.endedAt ? "" : `<div class="now" style="left:${pct(now)}%"></div>`}</div>
+    ${r.result ? `<div style="font-size:12.5px;margin-bottom:6px">✓ ${esc(r.result)}</div>` : ""}
+    ${r.error ? `<div style="font-size:12.5px;margin-bottom:6px;color:var(--red)">✕ ${esc(r.error)}</div>` : ""}
+    <div class="steps">${stepRows}</div>
+  </div>`;
+}
+setInterval(() => Object.values(jobRuns).some((r) => !r.endedAt) && renderRuns(), 1000);
+
+function renderTranscript() {
+  const box = $("transcript");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  if (!transcript.length) { box.innerHTML = '<div class="empty">Empty conversation. Try scenario 3, or send a message.</div>'; return; }
+  box.innerHTML = transcript.map((it) => {
+    if (it.kind === "user") return `<div class="msg user"><div class="who">you</div><div class="bubble">${esc(it.text)}</div></div>`;
+    if (it.kind === "event") return `<div class="msg event"><div class="txt">◆ ${esc(it.text)}${it.note ? ` · ${esc(it.note)}` : ""}</div></div>`;
+    if (it.kind === "assistant") return `<div class="msg assistant"><div class="who">agent${it.model ? ` · ${esc(it.model)}` : ""}</div>${it.blocks.map(renderBlock).join("")}${it.error ? `<div style="color:var(--red)">${esc(it.error)}</div>` : ""}</div>`;
+    return "";
+  }).join("");
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+function renderBlock(b) {
+  if (b.type === "text") return `<div class="txt">${esc(b.text)}</div>`;
+  if (b.type === "thinking") return `<div class="txt dim">${esc(b.text)}</div>`;
+  if (b.type !== "tool") return "";
+  const c = b.call;
+  const interrupted = /was interrupted and may have partially run/.test(c.result || "");
+  const live = liveTools[c.callId];
+  const running = !c.result && c.status !== "done" && c.status !== "error";
+  const cls = interrupted ? "interrupted" : running ? "running" : c.status === "error" ? "error" : "done";
+  const st = interrupted ? "⚠ INTERRUPTED · may have partially run, not re-run"
+    : running ? (lab.state === "running" ? '<span class="spinner"></span> running' : "⏸ process dead, will resume")
+    : c.status === "error" ? "error" : "✓ done";
+  const out = c.result ?? live ?? "";
+  const args = c.args?.command ?? JSON.stringify(c.args ?? {});
+  return `<div class="tool ${cls}"><div class="th">⚙ ${esc(c.name)} <span class="dim">${esc(String(args).slice(0, 80))}</span><span class="st">${st}</span></div>${out ? `<pre>${esc(out)}</pre>` : ""}</div>`;
+}
+
+function renderTasks(tasks) {
+  const box = $("tasks");
+  if (!tasks?.length) { box.innerHTML = '<div class="empty" style="padding:10px">no live tasks: idle</div>'; return; }
+  box.innerHTML = tasks.map((t) => {
+    const st = t.state || {};
+    return `<div class="task"><span class="dim">#${t.id}</span><span>${esc(t.kind)}${t.label ? ` <span class="dim">${esc(t.label)}</span>` : ""}${t.background ? ' <span class="dim">(bg)</span>' : ""}</span><span class="s ${st.status}">${esc(st.status || "")}${st.phase ? ` · ${esc(st.phase)}` : ""}</span></div>`;
+  }).join("");
+}
+
+connectLab();
+</script>
+</body>
+</html>

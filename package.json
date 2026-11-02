@@ -1,0 +1,11 @@
+{
+  "name": "durable-factory",
+  "private": true,
+  "type": "module",
+  "description": "A durable AI software factory on Durable Pi: plan, build, test, review, then wait for your approval. Survives kill -9.",
+  "scripts": {
+    "start": "bun server.ts",
+    "setup": "bun setup.ts",
+    "live": "LAB_PROVIDER=anthropic bun server.ts"
+  }
+}

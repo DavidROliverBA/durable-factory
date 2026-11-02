@@ -1,0 +1,498 @@
+diff --git a/apps/dpi-backend/src/config.ts b/apps/dpi-backend/src/config.ts
+index f5036a6..9ecbf9c 100644
+--- a/apps/dpi-backend/src/config.ts
++++ b/apps/dpi-backend/src/config.ts
+@@ -13,7 +13,7 @@ export interface BackendConfig {
+   envFile: string;
+   dataDir: string;
+   startDirs: string[];
+-  provider: "openrouter" | "faux";
++  provider: "openrouter" | "faux" | "anthropic";
+   token: string;
+ }
+ 
+@@ -41,7 +41,7 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
+       .split(":")
+       .filter(Boolean)
+       .map((p) => resolve(expand(p))),
+-    provider: (env.DPI_PROVIDER ?? "openrouter") === "faux" ? "faux" : "openrouter",
++    provider: ((p) => (p === "faux" || p === "anthropic" ? p : "openrouter"))(env.DPI_PROVIDER ?? "openrouter"),
+     token: env.DPI_TOKEN ?? "",
+   };
+   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
+diff --git a/apps/dpi-backend/src/jobs.ts b/apps/dpi-backend/src/jobs.ts
+index 5a0e7fc..cf8ef13 100644
+--- a/apps/dpi-backend/src/jobs.ts
++++ b/apps/dpi-backend/src/jobs.ts
+@@ -15,7 +15,7 @@ import {
+   type TaskRuntime,
+   type Tx,
+ } from "@earendil-works/pi-durable";
+-import { CodingTools, createBashTool, createReadTool } from "@earendil-works/pi-durable/tools";
++import { CodingTools, createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+ import { readState } from "../../dpi-sdk/src/app-state.js";
+ import type { WireAssistantMessage, WireMessage, WireToolResultMessage } from "../../dpi-sdk/src/api.js";
+ import { messageText } from "../../dpi-sdk/src/transcript.js";
+@@ -121,6 +121,18 @@ export const JOB_DEFS: JobDef[] = [
+ 
+ export const jobDef = (id: string) => JOB_DEFS.find((d) => d.id === id);
+ 
++/**
++ * Add a job from outside this file (DPI_JOB_MODULES loads such modules at startup, before any session opens).
++ * The handlers are keyed by phase id; approval phases run in the engine and need no handler.
++ */
++export function registerJob(def: JobDef, handlers: Record<string, Handler>) {
++  if (JOB_DEFS.some((d) => d.id === def.id)) throw Error(`Job ${def.id} is already registered`);
++  for (const phase of def.phases)
++    if (phase.kind !== "approval" && !handlers[phase.id]) throw Error(`Job ${def.id} has no handler for phase ${phase.id}`);
++  JOB_DEFS.push(def);
++  HANDLERS[def.id] = handlers;
++}
++
+ /** Validate a job's input against its spec, filling defaults. Throws a message the caller can show as is. */
+ export function resolveJobInput(def: JobDef, raw: unknown): Values {
+   const given = (raw ?? {}) as Record<string, unknown>;
+@@ -147,7 +159,7 @@ export function resolveJobInput(def: JobDef, raw: unknown): Values {
+ 
+ // ------------------------------------------------------------------ the phase API job handlers use
+ 
+-interface Phase {
++export interface Phase {
+   readonly input: Values;
+   readonly data: Data;
+   readonly iteration: number;
+@@ -155,20 +167,46 @@ interface Phase {
+   now(): number;
+   /** Run a shell command in the session's folder and record it as a step. Throws on a non-zero exit. */
+   exec(command: string, label?: string): Promise<string>;
+-  /** Run a shell command without recording it. */
+-  shell(command: string): Promise<{ code: number; out: string }>;
++  /** Run a shell command without recording it. `timeoutSec` defaults to 60. */
++  shell(command: string, timeoutSec?: number): Promise<{ code: number; out: string }>;
++  /**
++   * Compute a value once per run and key, durably: the first result is committed to the run record and every later
++   * call (after a restart too) returns it without running `fn`. Use it for anything that must not be recomputed, like
++   * the baseline taken before an agent starts changing files.
++   */
++  memo<T extends JsonValue>(key: string, fn: () => Promise<T>): Promise<T>;
++  /** Total model cost in USD of the run's keyed subagents so far. */
++  cost(): Promise<number>;
+   step<T>(kind: JobStepKind, label: string, fn: () => Promise<{ value: T; detail?: string }>): Promise<T>;
+   note(label: string, detail?: string): Promise<void>;
+   progress(done: number, total: number): Promise<void>;
+   saveState(path: string, value: JsonValue): Promise<void>;
+   readState(path: string): Promise<JsonValue | undefined>;
+-  /** Run a subagent with read and bash in an owned child conversation; its tool calls become steps. */
+-  agent(prompt: string): Promise<string>;
++  /**
++   * Run a subagent in an owned child conversation; its tool calls become steps. Without options it is the job's one
++   * read-and-bash helper. With a `key`, each key is its own durable conversation (role, tools, instructions, model),
++   * created once and found again after a restart; `turn` sends a further message into the same conversation.
++   */
++  agent(prompt: string, opts?: AgentOptions): Promise<string>;
+   sleepUntil(at: number): Promise<void>;
+ }
+ 
+-type Outcome = { done: string; data?: Data } | { again: Data; summary?: string };
+-type Handler = (p: Phase) => Promise<Outcome>;
++export type AgentTool = "read" | "bash" | "write" | "edit";
++export interface AgentOptions {
++  /** Names the conversation within the run, e.g. `build` or `fix:2`. */
++  key?: string;
++  /** Shown in the run record, e.g. `builder`. */
++  role?: string;
++  tools?: AgentTool[];
++  instructions?: string;
++  model?: { provider: string; modelId: string };
++  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
++  /** A further message into an existing keyed conversation (0 = first). */
++  turn?: number;
++}
++export type Outcome = { done: string; data?: Data } | { again: Data; summary?: string };
++export type Handler = (p: Phase) => Promise<Outcome>;
++export type { Data as JobData, Values as JobValues };
+ 
+ const inDir = (dir: string, command: string) => (dir === "." ? command : `cd ${q(dir)} && ${command}`);
+ const label = (dir: string, command: string) => (dir === "." ? command : `${command}  (in ${dir})`);
+@@ -373,7 +411,7 @@ const CHILD_INSTRUCTIONS =
+   "You are one phase of a durable job. Use only the commands and files the task names. Never edit or write files. Answer in at most 5 short lines.";
+ 
+ export function createJobs(deps: JobsDeps) {
+-  const Approval = defineTask<{ runId: number }, { phase: "wait" }, { approved: boolean }>({
++  const Approval = defineTask<{ runId: number }, { phase: "wait" }, { approved: boolean; sendBack?: boolean }>({
+     name: "demo.job-approval",
+     version: 1,
+     initial: () => ({ phase: "wait" }),
+@@ -385,7 +423,10 @@ export function createJobs(deps: JobsDeps) {
+           const decision = doc?.items[String(task.input.runId)]?.approval;
+           if (decision && decision !== "pending") {
+             await runtime.commit(
+-              () => ({ status: "terminal", outcome: { status: "completed", result: { approved: decision === "approved" } } }),
++              () => ({
++                status: "terminal",
++                outcome: { status: "completed", result: { approved: decision === "approved", ...(decision === "changes" ? { sendBack: true } : {}) } },
++              }),
+               ctx,
+             );
+             return;
+@@ -410,11 +451,11 @@ export function createJobs(deps: JobsDeps) {
+         current.updatedAt = runtime.now();
+         return undefined;
+       }, ctx);
+-    const shell = async (command: string) => {
++    const shell = async (command: string, timeoutSec = 60) => {
+       const env = await runtime.env(ctx);
+       if (!env) throw Error("This session has no execution environment");
+       let out = "";
+-      const result = await env.exec(command, { timeout: 60, onOutput: (text) => void (out.length < 50_000 && (out += text)) }, ctx);
++      const result = await env.exec(command, { timeout: timeoutSec, onOutput: (text) => void (out.length < 50_000 && (out += text)) }, ctx);
+       if (!result.ok) throw Error(`${command}: ${result.error.message}`);
+       return { code: result.value.exitCode, out };
+     };
+@@ -476,29 +517,53 @@ export function createJobs(deps: JobsDeps) {
+         }
+       },
+       sleepUntil: (at) => runtime.sleep(at, ctx),
+-      agent: async (prompt) => {
++      memo: async (key, fn) => {
++        const saved = (await runtime.snapshot(JobRuns, task.conversationId, ctx))?.items[String(task.id)]?.memo;
++        if (saved && Object.hasOwn(saved, key)) return saved[key] as never;
++        const value = await fn();
++        let kept: JsonValue = value;
++        await record((r) => {
++          r.memo ??= {};
++          if (Object.hasOwn(r.memo, key)) kept = r.memo[key] as JsonValue;
++          else r.memo[key] = plain(value);
++        });
++        return kept as never;
++      },
++      cost: async () => {
++        const costs = (await runtime.snapshot(JobRuns, task.conversationId, ctx))?.items[String(task.id)]?.costs ?? {};
++        return Object.values(costs).reduce((a, b) => a + b, 0);
++      },
++      agent: async (prompt, opts = {}) => {
+         let childId = 0;
+-        const stepId = `${spec.id}:${cp.iteration}:agent`;
++        const key = opts.key;
++        const turn = opts.turn ?? 0;
++        const stepId = key ? `${spec.id}:${cp.iteration}:agent:${key}:${turn}` : `${spec.id}:${cp.iteration}:agent`;
+         const at = runtime.now();
+         await runtime.commit(async (tx) => {
+-          const found = (await tx.scanConversations({ ownerTaskId: task.id }, 1)).items[0];
+-          if (found) childId = found.id as number;
++          const current = await runOf(tx, task);
++          const known = key ? current.agents?.[key] : undefined;
++          const found = key ? undefined : (await tx.scanConversations({ ownerTaskId: task.id }, 1)).items[0];
++          if (known !== undefined) childId = known;
++          else if (found) childId = found.id as number;
+           else {
+             const child = await tx.createConversation({ ownership: { kind: "task", taskId: task.id } });
++            const make = { read: createReadTool, bash: createBashTool, write: createWriteTool, edit: createEditTool };
+             await configure(tx, child.id, {
+               extensions: [CodingTools],
+-              tools: [createReadTool(), createBashTool()],
+-              instructions: CHILD_INSTRUCTIONS,
++              tools: (key ? (opts.tools ?? ["read", "bash"]) : (["read", "bash"] as AgentTool[])).map((t) => make[t]()),
++              instructions: key ? (opts.instructions ?? CHILD_INSTRUCTIONS) : CHILD_INSTRUCTIONS,
++              ...(opts.model ? { model: opts.model } : {}),
++              ...(opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {}),
+             });
+             childId = child.id as number;
++            if (key) current.agents = { ...(current.agents ?? {}), [key]: childId };
+           }
+-          const current = await runOf(tx, task);
+           current.childConversationId = childId;
+           upsertStep(current.phases[index], {
+             id: stepId,
+             kind: "agent",
+-            label: `Subagent #${childId}`,
+-            detail: "Working with read and bash",
++            label: key ? `${opts.role ?? key} #${childId}${turn ? ` (turn ${turn + 1})` : ""}` : `Subagent #${childId}`,
++            detail: key ? `${key}: ${(opts.tools ?? ["read", "bash"]).join(", ")}` : "Working with read and bash",
+             status: "running",
+             iteration: cp.iteration,
+             at,
+@@ -509,7 +574,7 @@ export function createJobs(deps: JobsDeps) {
+         const handle = await runtime.conversation(childId as ConversationId, ctx);
+         if (!handle) throw Error(`Subagent #${childId} is missing`);
+         const submission = await handle.submit(
+-          { type: "input", content: prompt, requestId: `job:${task.id}:${spec.id}` },
++          { type: "input", content: prompt, requestId: key ? `job:${task.id}:${key}:${turn}` : `job:${task.id}:${spec.id}` },
+           ctx,
+         );
+         const settled = submission.wait(ctx);
+@@ -568,13 +633,20 @@ export function createJobs(deps: JobsDeps) {
+           await sync();
+         }
+         const view = await sync();
++        if (key) {
++          let spent = 0;
++          for (const entry of view.entries)
++            for (const m of (entry.model ?? []) as unknown as { role: string; usage?: { cost?: { total?: number } } }[])
++              if (m.role === "assistant") spent += m.usage?.cost?.total ?? 0;
++          await record((r) => void (r.costs = { ...(r.costs ?? {}), [key]: spent }));
++        }
+         const answer = done.status === "done" && done.type === "input" ? view.entries.find((e) => e.id === done.answer) : undefined;
+         const text = answer ? ((answer.model ?? []) as unknown as WireMessage[]).map(messageText).join("").trim() : "";
+         await record((_r, phase) =>
+           upsertStep(phase, {
+             id: stepId,
+             kind: "agent",
+-            label: `Subagent #${childId}`,
++            label: key ? `${opts.role ?? key} #${childId}${turn ? ` (turn ${turn + 1})` : ""}` : `Subagent #${childId}`,
+             detail: clip(text || `Ended: ${done.status}`, 600),
+             status: text ? "done" : "error",
+             iteration: cp.iteration,
+@@ -639,8 +711,35 @@ export function createJobs(deps: JobsDeps) {
+       }, ctx);
+       return;
+     }
+-    const [outcome] = await runtime.outcomes([cp.approvalTask as TaskId<{ approved: boolean }>], ctx);
++    const [outcome] = await runtime.outcomes([cp.approvalTask as TaskId<{ approved: boolean; sendBack?: boolean }>], ctx);
+     const approved = outcome.status === "completed" && outcome.result.approved;
++    const target = spec.sendBackTo ? def.phases.findIndex((p) => p.id === spec.sendBackTo) : -1;
++    if (outcome.status === "completed" && outcome.result.sendBack && target >= 0 && target < index) {
++      // Send back: reopen the phases from the target through this approval and continue at the target with the note.
++      await runtime.commit(async (tx) => {
++        const run = await runOf(tx, task);
++        const now = runtime.now();
++        const note = run.approvalNote ?? "";
++        const step = run.phases[index].steps.find((s) => s.id === `${spec.id}:0:decision`);
++        if (step) Object.assign(step, { status: "done", label: "Sent back by you", detail: clip(note, 600), ms: now - step.at, id: `${spec.id}:sent:${now}` });
++        const nextIteration = Math.max(0, ...run.phases[target].steps.map((s) => s.iteration + 1));
++        for (let i = target; i <= index; i++) {
++          run.phases[i].status = "pending";
++          delete run.phases[i].progress;
++        }
++        run.phases[target].startedAt = now;
++        run.approval = undefined;
++        run.status = "running";
++        run.phase = spec.sendBackTo;
++        run.updatedAt = now;
++        const sentBack = (Number(cp.data.sentBack) || 0) + 1;
++        return {
++          status: "running" as const,
++          checkpoint: { phase: spec.sendBackTo!, iteration: nextIteration, data: { ...cp.data, note, sentBack } },
++        };
++      }, ctx);
++      return;
++    }
+     const decided = (status: JobStep["status"], text: string) =>
+       runtime.commit(async (tx) => {
+         const run = await runOf(tx, task);
+diff --git a/apps/dpi-backend/src/main.ts b/apps/dpi-backend/src/main.ts
+index 848f542..2514196 100644
+--- a/apps/dpi-backend/src/main.ts
++++ b/apps/dpi-backend/src/main.ts
+@@ -7,8 +7,15 @@ import { Store } from "./store.js";
+ import { bearerAuth } from "./auth.js";
+ import { errorMiddleware } from "./errors.js";
+ import { v1 } from "./routes.js";
++import { pathToFileURL } from "node:url";
++import { resolve } from "node:path";
+ 
+ const config = loadConfig();
++// Extra durable jobs: colon-separated module paths, each calling registerJob() from ./jobs.js when imported.
++for (const path of (process.env.DPI_JOB_MODULES ?? "").split(":").filter(Boolean)) {
++  await import(pathToFileURL(resolve(path)).href);
++  console.log(`job module: ${path}`);
++}
+ const store = await Store.open({
+   dataDir: config.dataDir,
+   startDirs: config.startDirs,
+diff --git a/apps/dpi-backend/src/model-catalog.ts b/apps/dpi-backend/src/model-catalog.ts
+index 1eeab5a..beed110 100644
+--- a/apps/dpi-backend/src/model-catalog.ts
++++ b/apps/dpi-backend/src/model-catalog.ts
+@@ -178,3 +178,14 @@ export const curatedModels = [
+   },
+ ] as const;
+ export const defaultModelId = "anthropic/claude-sonnet-5.5";
++
++/** DPI_PROVIDER=anthropic: the same top models, called directly on the Anthropic API with ANTHROPIC_API_KEY. */
++export const anthropicModels = [
++  { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", tier: "S+", icon: "anthropic.png" },
++  { id: "claude-opus-5-5", name: "Claude Opus 5.5", tier: "S+", icon: "anthropic.png" },
++  { id: "claude-fable-5-1", name: "Claude Fable 5.1", tier: "S+", icon: "anthropic.png" },
++  { id: "claude-opus-5", name: "Opus 5", tier: "S+", icon: "anthropic.png" },
++  { id: "claude-sonnet-5", name: "Sonnet 5", tier: "S", icon: "anthropic.png" },
++  { id: "claude-haiku-4-5", name: "Haiku 4.5", tier: "B", icon: "anthropic.png" },
++];
++export const anthropicDefaultModelId = "claude-sonnet-5-5";
+diff --git a/apps/dpi-backend/src/routes.ts b/apps/dpi-backend/src/routes.ts
+index 338eee6..16e1300 100644
+--- a/apps/dpi-backend/src/routes.ts
++++ b/apps/dpi-backend/src/routes.ts
+@@ -175,7 +175,7 @@ export function v1(store: Store) {
+   );
+   r.post(
+     `${a}/demo/jobs/:taskId/approval`,
+-    route(async (req, res) => res.json(await store.approveJob(L(res).c, int(req.params.taskId, "taskId"), req.body?.approved))),
++    route(async (req, res) => res.json(await store.approveJob(L(res).c, int(req.params.taskId, "taskId"), req.body?.approved, req.body?.note, req.body?.sendBack))),
+   );
+ 
+   return r;
+diff --git a/apps/dpi-backend/src/store.ts b/apps/dpi-backend/src/store.ts
+index 313accd..8b0f7b7 100644
+--- a/apps/dpi-backend/src/store.ts
++++ b/apps/dpi-backend/src/store.ts
+@@ -39,7 +39,8 @@ import { randomUUID } from "node:crypto";
+ import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
+ import { createModels } from "@earendil-works/pi-ai/models";
+ import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+-import { curatedModels, defaultModelId } from "./model-catalog.js";
++import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
++import { anthropicDefaultModelId, anthropicModels, curatedModels as openrouterModels, defaultModelId as openrouterDefaultModelId } from "./model-catalog.js";
+ import { fauxModels, installFaux } from "./faux.js";
+ import {
+   Harness,
+@@ -90,7 +91,7 @@ export interface StoreOptions {
+   dataDir: string;
+   startDirs: string[];
+   name: string;
+-  provider: "openrouter" | "faux";
++  provider: "openrouter" | "faux" | "anthropic";
+ }
+ 
+ /** Agent documents a client may read or stream, by kind. */
+@@ -179,10 +180,11 @@ export class Store {
+   private constructor(readonly options: StoreOptions) {
+     if (options.provider === "faux") installFaux(this.models);
+     else {
+-      const provider = openrouterProvider();
++      const provider = options.provider === "anthropic" ? anthropicProvider() : openrouterProvider();
++      const curatedModels = this.curated;
+       const catalog = provider.getModels();
+       for (const model of curatedModels)
+-        if (!catalog.some((m) => m.id === model.id)) throw Error(`OpenRouter catalog missing ${model.id}`);
++        if (!catalog.some((m) => m.id === model.id)) throw Error(`${options.provider} catalog missing ${model.id}`);
+       this.models.setProvider({
+         ...provider,
+         getModels: () => catalog.filter((m) => curatedModels.some((c) => c.id === m.id)),
+@@ -263,8 +265,19 @@ export class Store {
+     };
+   }
+ 
++  /** The curated models of the live (non-faux) provider. */
++  private get curated() {
++    return this.options.provider === "anthropic" ? anthropicModels : openrouterModels;
++  }
++  private get liveProvider() {
++    return this.options.provider === "anthropic" ? "anthropic" : "openrouter";
++  }
++  private get liveDefaultModelId() {
++    return this.options.provider === "anthropic" ? anthropicDefaultModelId : openrouterDefaultModelId;
++  }
++
+   private defaultModel() {
+-    return this.options.provider === "faux" ? fauxModels[0].id : defaultModelId;
++    return this.options.provider === "faux" ? fauxModels[0].id : this.liveDefaultModelId;
+   }
+ 
+   private async loadModels(): Promise<ModelInfo[]> {
+@@ -279,14 +292,14 @@ export class Store {
+         reasoning: false,
+         cost: { input: 0, output: 0 },
+       }));
+-    const available = await this.models.getAvailable("openrouter", { signal: AbortSignal.timeout(10000) });
+-    return curatedModels.flatMap((c) => {
++    const available = await this.models.getAvailable(this.liveProvider, { signal: AbortSignal.timeout(10000) });
++    return this.curated.flatMap((c) => {
+       const m = available.find((m) => m.id === c.id);
+       return m
+         ? [
+             {
+               id: m.id,
+-              provider: "openrouter",
++              provider: this.liveProvider,
+               name: c.name,
+               tier: c.tier,
+               icon: c.icon,
+@@ -304,10 +317,16 @@ export class Store {
+       const id = fauxModels.some((m) => m.id === model?.modelId) ? model!.modelId : fauxModels[0].id;
+       return { provider: "faux", modelId: id };
+     }
+-    const exact = model?.provider === "openrouter" ? model.modelId : `${model?.provider}/${model?.modelId}`;
++    const live = this.liveProvider;
++    const exact =
++      model?.provider === live
++        ? model.modelId
++        : live === "openrouter"
++          ? `${model?.provider}/${model?.modelId}`
++          : String(model?.modelId ?? "").replace(/^anthropic\//, "").replaceAll(".", "-");
+     return {
+-      provider: "openrouter",
+-      modelId: curatedModels.some((m) => m.id === exact) ? exact : defaultModelId,
++      provider: live,
++      modelId: this.curated.some((m) => m.id === exact) ? exact : this.liveDefaultModelId,
+     };
+   }
+ 
+@@ -318,8 +337,8 @@ export class Store {
+     const known =
+       this.options.provider === "faux"
+         ? m.provider === "faux" && fauxModels.some((f) => f.id === m.modelId)
+-        : m.provider === "openrouter" &&
+-          curatedModels.some((c) => c.id === m.modelId) &&
++        : m.provider === this.liveProvider &&
++          this.curated.some((c) => c.id === m.modelId) &&
+           !!this.models.getModel(m.provider, m.modelId);
+     if (!known) throw invalid(`Unknown model ${m.provider}/${m.modelId}. Choose one from GET /v1/device models`);
+     return { provider: m.provider, modelId: m.modelId };
+@@ -1142,12 +1161,19 @@ export class Store {
+     return { taskId: taskId as number };
+   }
+ 
+-  async approveJob(c: Conversation, taskId: number, approved: unknown) {
++  async approveJob(c: Conversation, taskId: number, approved: unknown, note?: unknown, sendBack?: unknown) {
+     if (typeof approved !== "boolean") throw invalid("approved must be a boolean");
++    if (note !== undefined && typeof note !== "string") throw invalid("note must be a string");
+     await c.commit(async (tx) => {
+       const run = (await tx.doc(JobRuns, c.id)).items[String(taskId)];
+       if (!run || run.approval !== "pending") throw new ApiFault("conflict", "No pending approval for that run");
+-      run.approval = approved ? "approved" : "declined";
++      if (sendBack === true) {
++        const phase = jobDef(run.job)?.phases.find((p) => p.id === run.phase);
++        if (approved || !phase?.sendBackTo) throw invalid("This approval cannot be sent back");
++        if (!note?.trim()) throw invalid("A send back needs a note");
++        run.approval = "changes";
++        run.approvalNote = note.trim().slice(0, 4000);
++      } else run.approval = approved ? "approved" : "declined";
+     }, ctx);
+     return { ok: true as const };
+   }
+diff --git a/apps/dpi-sdk/src/jobs.ts b/apps/dpi-sdk/src/jobs.ts
+index 088c0c6..5bc8859 100644
+--- a/apps/dpi-sdk/src/jobs.ts
++++ b/apps/dpi-sdk/src/jobs.ts
+@@ -1,3 +1,4 @@
++import type { JsonValue } from "./app-state.js";
+ // Durable jobs: repeatable workflows. Each run is one pi-durable task whose checkpoint phases are the job's named
+ // phases. The run's record lives in the conversation document `demo.job-runs`, so every client renders the same
+ // phases, steps and approval, live and after a restart. Types are aliases (not interfaces) so they stay JSON documents.
+@@ -21,6 +22,8 @@ export type JobPhaseSpec = {
+   summary: string;
+   /** `approval` phases wait for a person's decision; `repeat` phases save one checkpoint per iteration. */
+   kind?: "approval" | "repeat";
++  /** Approval phases: the phase a "send back with a note" decision returns to. */
++  sendBackTo?: string;
+ };
+ 
+ export type JobDef = {
+@@ -82,7 +85,15 @@ export type JobRun = {
+   status: JobRunStatus;
+   phase?: string;
+   phases: JobPhaseRun[];
+-  approval?: "pending" | "approved" | "declined" | "cancelled";
++  approval?: "pending" | "approved" | "declined" | "cancelled" | "changes";
++  /** With approval "changes": what the person asked for; the run goes back to the phase's `sendBackTo`. */
++  approvalNote?: string;
++  /** Keyed subagent conversations the run created (key → conversation id). */
++  agents?: Record<string, number>;
++  /** USD spent by each keyed subagent conversation. */
++  costs?: Record<string, number>;
++  /** Values a phase computed once (Phase.memo), kept across restarts. */
++  memo?: Record<string, JsonValue>;
+   childConversationId?: number;
+   /** How many times the run continued from a checkpoint after a restart. */
+   resumed: number;
